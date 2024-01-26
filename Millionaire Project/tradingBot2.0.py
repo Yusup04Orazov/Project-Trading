@@ -9,8 +9,8 @@ import pandas as pd
 
 # Login to Robinhood
 login_response = rh.authentication.login(
-    username="y.orazov2018@gmail.com",
-    password="Turkmenistan123@", 
+    username="username",
+    password="password", 
     expiresIn=86400,
     scope='internal',
     by_sms=True,
