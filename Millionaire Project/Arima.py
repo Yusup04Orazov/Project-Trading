@@ -16,73 +16,66 @@ login_response = rh.authentication.login(
     by_sms=True,
     store_session=True)
 
-# Initialize variables
-price_change_count = 1
-last_price = None
 
-# Initialize p, d, q
-p = 0
-d = 0
-q = 0
+symbols = ["BTC", "ETH", "DOGE", "BNB"]
 
-# Last saved price
-last_logged_price = 0
+data = {
+    symbol: {
+        'price_change_count': 1,
+        'prices': [],
+        'moving_average_200': [],
+        'macd': [],
+        'signal_line': [],
+        'last_logged_price': 0,
+        'last_trade_action': None,
+        'last_saved_change_number':0,
+        'future_price': [],
+        'price_direction': 0,
+        'coins_bought': 0,
+        'coins_sold':0
+    }
+    for symbol in symbols
+}
 
-# Track predicted prices
-predicted_prices = set()
+# Define the file paths to save the graphs
+graph_file_paths = {symbol: f'{symbol}_currentPrice.png' for symbol in symbols}
+macd_file_paths = {symbol: f'{symbol}_macd.png' for symbol in symbols}
+currentPrice_file_paths = {symbol: f'{symbol}_prices.jsonl' for symbol in symbols}
+predictedPrice_paths = {symbol: f'{symbol}_predictedPrices.png' for symbol in symbols}
 
-# Track last saved change_number
-last_saved_change_number = 0
+# Define file paths for saving data
+predictions_file_paths = {symbol: f'{symbol}_predictions.jsonl' for symbol in symbols}
+analysis_file_paths = {symbol: f'{symbol}_analyze.jsonl' for symbol in symbols}
 
-# Initialize a list to keep track of the most recent 100 future prices
-recent_future_prices = []
+# Define the file path for trade signals
+buy_sell_signals_file = 'trade.jsonl'
 
-# Define the file path to save the graph
-predicted_prices_graph = 'predictedPrice.png'
-macd_file_path = 'macd.png'
-current_prices_graph = 'currentPrice.png'
+bought_price = 0
+sold_price = 0
+prediction_n = 35
 
-# Initialize variables for moving averages
-moving_average_12 = []
-moving_average_100 = []
-diff_moving_avg = []
-enter_trade = None
-trade_decision = None
+investment = 25000
 
-# Initialize variables
-prices = []
-macd = []  
-signal_line = []
+# Function to fit ARIMA model and make predictions
+def fit_arima_and_predict(prices):
+    # Remove NaN values from the input data
+    prices = np.nan_to_num(prices)
+
+    # Fit ARIMA model using auto_arima
+    arima_model = pm.auto_arima(prices, seasonal=False, trace=True)
+    
+    # Make predictions
+    predictions = arima_model.predict(n_periods=prediction_n)
+    return predictions
+
 
 # Function to calculate moving averages
-def calculate_moving_averages(prices):
-    if len(prices) >= 12:
-        moving_average_12.append(round(np.mean(prices[-12:]), 2))
+def calculate_moving_averages(prices, moving_average_list):
     if len(prices) >= 200:
-        moving_average_100.append(round(np.mean(prices[-200:]), 2))
-
-# Define a function to determine the optimal p, d, and q values based on the most recent 40 current_price values
-def find_optimal_p_d_q(prices):
-    recent_prices = prices[-200:]
-    model = auto_arima(recent_prices, stepwise=True, trace=True, seasonal=False, error_action='ignore', suppress_warnings=True)
-    p, d, q = model.order
-    return p, d, q
+        moving_average_list.append(round(np.mean(prices[-200:]), 2))
 
 # Function to calculate MACD
-# def calculate_macd(prices):
-#     prices_df = pd.DataFrame(prices, columns=['current_price'])
-#     prices_df['EMA_12'] = prices_df['current_price'].ewm(span=12, adjust=False).mean()
-#     prices_df['EMA_26'] = prices_df['current_price'].ewm(span=26, adjust=False).mean()
-    
-#     prices_df['MACD'] = prices_df['EMA_12'] - prices_df['EMA_26']
-#     prices_df['Signal_Line'] = prices_df['MACD'].ewm(span=9, adjust=False).mean()
-    
-#     macd.append(prices_df['MACD'].iloc[-1])
-#     signal_line.append(prices_df['Signal_Line'].iloc[-1])
-    
-#     return prices_df
-
-def calculate_macd(prices):
+def calculate_macd(prices, macd_list, signal_line_list, threshold_multiplier=1.15):
     prices_df = pd.DataFrame(prices, columns=['current_price'])
     prices_df['EMA_12'] = prices_df['current_price'].ewm(span=12, adjust=False).mean()
     prices_df['EMA_26'] = prices_df['current_price'].ewm(span=26, adjust=False).mean()
@@ -90,205 +83,264 @@ def calculate_macd(prices):
     prices_df['MACD'] = prices_df['EMA_12'] - prices_df['EMA_26']
     prices_df['Signal_Line'] = prices_df['MACD'].ewm(span=9, adjust=False).mean()
 
+    # Round MACD and Signal_Line to nearest 4 decimals
     prices_df['MACD'] = prices_df['MACD'].round(3)
     prices_df['Signal_Line'] = prices_df['Signal_Line'].round(3)
-    
+
+    macd_values = prices_df['MACD'].values
+    # Calculate the range of MACD values
+    macd_range = np.mean(macd_values)
+    # Set threshold based on MACD range and multiplier
+    threshold = threshold_multiplier * macd_range
+
     macd_value = prices_df['MACD'].iloc[-1]
     signal_line_value = prices_df['Signal_Line'].iloc[-1]
 
-    macd_range = np.mean(macd_value)
-
-    # Set MACD and Signal_Line to 0 if abs(MACD) is less than 0.1
-    if abs(macd_value) < 1.15 * macd_range:
+    # Set MACD and Signal_Line to 0 if abs(MACD) is less than the threshold
+    if abs(macd_value) < threshold:
         macd_value = 0.0
         signal_line_value = 0.0
-    
-    macd.append(macd_value)
-    signal_line.append(signal_line_value)
+    macd_list.append(macd_value)
+    signal_line_list.append(signal_line_value)
     
     return prices_df
 
+# TODO FIX HOW PORTOFLIO IS UPDATED. IT'S WRONG
+def generate_buy_signal(symbol, current_price, macd, signal_line):
+    global investment
+    global bought_price
+    global sold_price
+    global buy_signal
 
+    if (len(data[symbol]['moving_average_200']) > 0 and 
+        current_price > data[symbol]['moving_average_200'][-1] and 
+        data[symbol]['last_trade_action'] == None and 
+        macd < 0 and signal_line < 0 and 
+        macd > signal_line and 
+        data[symbol]['price_direction'] == 1 and investment >= (investment*0.5)):
+        
+        bought_price = current_price
+        data[symbol]['coins_bought'] = (investment*0.1) / bought_price
+        investment = investment - (data[symbol]['coins_bought'] * bought_price)
 
-# Initialize the plot
+        buy_signal = {
+            'action': 'buy',
+            'symbol': symbol,
+            'bought_price': bought_price,
+            'coins_bought': data[symbol]['coins_bought'],
+            'portfolio': investment
+        }
+        with open(buy_sell_signals_file, 'a') as f:
+            json.dump(buy_signal, f)
+            f.write('\n')
+
+        # Update the last trade action
+        data[symbol]['last_trade_action'] = "buy"
+
+    elif(len(data[symbol]['moving_average_200']) > 0 and 
+        current_price > data[symbol]['moving_average_200'][-1] and 
+        data[symbol]['last_trade_action'] == "sell" and 
+        macd < 0 and signal_line < 0 and 
+        macd > signal_line and 
+        data[symbol]['price_direction'] == 1 and investment >= (investment*0.5)):
+        
+        bought_price = current_price
+        data[symbol]['coins_bought'] = (investment*0.1) / bought_price
+        investment = investment - (data[symbol]['coins_bought'] * bought_price)
+        
+        buy_signal = {
+            'action': 'buy',
+            'symbol': symbol,
+            'bought_price': bought_price,
+            'coins_bought': data[symbol]['coins_bought'],
+            'portfolio': investment
+        }
+        with open(buy_sell_signals_file, 'a') as f:
+            json.dump(buy_signal, f)
+            f.write('\n')
+
+        # Update the last trade action
+        data[symbol]['last_trade_action'] = "buy"
+
+# TODO FIX HOW PORTOFLIO IS UPDATED. IT'S WRONG
+# TODO Implement RSI for selling the stock
+def generate_sell_signal(symbol, current_price, macd, signal_line):
+    global investment
+    global bought_price
+    global sold_price
+
+    if data[symbol]['last_trade_action'] == "buy":
+        with open(buy_sell_signals_file, 'r') as f:
+            buy_signals = [json.loads(line.strip()) for line in f]
+
+        # Find the most recent buy signal for the symbol
+        recent_buy_signal = next((buy_signal for buy_signal in reversed(buy_signals) if buy_signal['symbol'] == symbol), None)
+
+        if recent_buy_signal:
+            # Check conditions to generate a sell signal
+            if (macd > 0 and signal_line > 0 and macd < signal_line) or (current_price <= 0.87 * recent_buy_signal['bought_price']) or (current_price >= (1.00054 * recent_buy_signal['bought_price'])):
+                
+                sold_price = current_price
+                data[symbol]['coins_sold'] = data[symbol]['coins_bought']      
+                investment = investment + (data[symbol]['coins_sold'] * sold_price)
+                sell_signal = {
+                    'action': 'sell',
+                    'symbol': symbol,
+                    'sold_price': sold_price,
+                    'coins_sold': data[symbol]['coins_sold'],
+                    'portfolio': investment
+                }
+
+                with open(buy_sell_signals_file, 'a') as f:
+                    json.dump(sell_signal, f)
+                    f.write('\n')
+
+                print("sold!", symbol)
+
+                data[symbol]['last_trade_action'] = "sell"
+
+# Initialize the plot for derivatives
 plt.figure(figsize=(12, 6))
 plt.xlabel('Change Number')
-plt.ylabel('Price')
-plt.title('Price vs. Predicted Price')
+plt.ylabel('Derivative Value')
+plt.title('1st and 2nd Derivatives')
 
 # Initialize a counter for the collected prices
 price_count = 0
 
 while True:
-    # For Crypto
-    instrument = rh.crypto.get_crypto_quote("BTC")
-    if instrument is not None and 'mark_price' in instrument:
-        latest_price = float(instrument['mark_price'])
-    else:
-        print("Error getting price")
-        time.sleep(0.1)
-        continue
+    for symbol in symbols:
 
-    rounded_price = round(latest_price, 2)
+        ## For Crypto
+        instrument = rh.crypto.get_crypto_quote(symbol)
+        if instrument is not None and 'mark_price' in instrument:
+            latest_price = float(instrument['mark_price'])
+        else:
+            print(f"Error getting price for {symbol}")
+            time.sleep(0.1)
+            continue
 
-    if len(prices) > 0:
-        last_logged_price = prices[-1]
-        
-    if rounded_price != last_logged_price:
-        prices.append(rounded_price)
-        prices_df = calculate_macd(prices)
-        calculate_moving_averages(prices)  # Calculate moving averages
+        # # For Stocks
+        # instrument = rh.stocks.get_stock_quote_by_symbol(symbol)
+        # if instrument is not None and 'ask_price' in instrument:
+        #     latest_price = float(instrument['ask_price'])
+        # else:
+        #     print(f"Error getting price for {symbol}")
+        #     time.sleep(0.1)
+        #     continue
 
-        log_data = {
-            'change_number': price_change_count,
-            'current_price': rounded_price,
-            'moving_average_100': moving_average_100[-1] if moving_average_100 else None,
-            'macd': macd[-1],
-            'signal_line': signal_line[-1],
-        }
+        data[symbol]['rounded_price'] = round(latest_price, 2)
+        last_logged_price = data[symbol]['last_logged_price']
 
-        with open('prices.jsonl', 'a') as f:
-            json.dump(log_data, f)
-            f.write('\n')
+        # Check to not save the same saved value before
+        if data[symbol]['rounded_price'] != last_logged_price:
 
-        price_change_count += 1
-        price_count += 1
+            data[symbol]['prices'].append(data[symbol]['rounded_price'])
+            calculate_macd(data[symbol]['prices'], data[symbol]['macd'], data[symbol]['signal_line'])
+            calculate_moving_averages(data[symbol]['prices'], data[symbol]['moving_average_200'])
 
-    time.sleep(0.000000001)
+            # Log data
+            log_data = {
+                'change_number': data[symbol]['price_change_count'],
+                'current_price': data[symbol]['rounded_price'],
+                'moving_average_200': data[symbol]['moving_average_200'][-1] if data[symbol]['moving_average_200'] else None,
+                'macd': data[symbol]['macd'][-1],
+                'signal_line': data[symbol]['signal_line'][-1],
+            }
 
-    if price_count == 200:
-        p, d, q = find_optimal_p_d_q(prices)
-        price_count = 0
+            with open(currentPrice_file_paths[symbol], 'a') as f:
+                json.dump(log_data, f)
+                f.write('\n')
 
-    # if len(prices) >= (p + q + d):
-    if len(prices) > 200:
-        model = ARIMA(prices, order=(p, d, q))
-        model_fit = model.fit()
-        start_index = len(prices)
-        end_index = start_index + 100
+            data[symbol]['price_change_count'] += 1
+            price_count += 1
 
-        predictions = model_fit.predict(start=start_index, end=end_index)
+            # Update the last_logged_price
+            data[symbol]['last_logged_price'] = data[symbol]['rounded_price']
 
-        rounded_predictions = [round(p, 2) for p in predictions]
+            # Perform ARIMA modeling and prediction
+            if len(data[symbol]['prices']) >= 200:  # Adjust the window size as needed
+                prices_for_arima = data[symbol]['prices'][-200:]  # Adjust the window size as needed
 
-        for i, pred in enumerate(rounded_predictions):
-            future_change_number = start_index + i
-            if future_change_number > last_saved_change_number:
-                predicted_prices.add(pred)
+                # Call fit_arima_and_predict with the computed values of p, d, and q
+                predictions = fit_arima_and_predict(prices_for_arima)
 
-                prediction_data = {
-                    'predicted_change_number': future_change_number,
-                    'future_price': round(pred, 2),
-                }
+                # Save new predictions to file
+                with open(predictions_file_paths[symbol], 'a') as predictions_file:
+                    for i, pred in enumerate(predictions):
+                        if len(data[symbol]['prices']) + i + 1 > data[symbol]['last_saved_change_number']:
+                            data[symbol]['future_price'].append(round(pred, 2))
 
-                with open('predictions.jsonl', 'a') as f:
-                    json.dump(prediction_data, f)
-                    f.write('\n')
+                            if len(data[symbol]['future_price']) >= prediction_n:
+                                mean_futurePrices = np.mean(data[symbol]['future_price'][-prediction_n])
 
-                last_saved_change_number = future_change_number
+                                if(mean_futurePrices > data[symbol]['rounded_price']):
+                                    data[symbol]['price_direction'] = 1
+                                    print("(1 is positive and 0 is negative)")
+                                    print("Price Direction is 1 (1 is positive and 0 is negative)")
+                                else:
+                                    data[symbol]['price_direction'] = 0
+                                    print("(1 is positive and 0 is negative)")
+                                    print("Price Direction is 0")
 
-                recent_future_prices.append(pred)
+                            prediction_data = {
+                                'predicted_change_number': len(data[symbol]['prices']) + i + 1,
+                                'future_price': round(pred, 2),
+                                'directoin':data[symbol]['price_direction']
+                                # 'future_price': data[symbol]['future_price']
+                            }
+                            json.dump(prediction_data, predictions_file)
+                            predictions_file.write('\n')
+                            data[symbol]['last_saved_change_number'] = len(data[symbol]['prices']) + i + 1
 
-                if len(recent_future_prices) == 100:
-                    
-                    minimum = min(recent_future_prices)
-                    maximum = max(recent_future_prices)
+            # Generate buy and sell signals
+            generate_buy_signal(symbol, log_data['current_price'], log_data['macd'], log_data['signal_line'])
+            generate_sell_signal(symbol, log_data['current_price'], log_data['macd'], log_data['signal_line'])
 
-                    first_derivative = np.diff(recent_future_prices, 1)
-                    second_derivative = np.diff(first_derivative, 1)
+            # Update cryptocurrency data
+            if len(data[symbol]['prices']) > 200:
+                data[symbol]['moving_average_200'].append(np.mean(data[symbol]['prices'][-200:]))
 
-                    rounded_first_derivative = round(first_derivative[-1], 2)
-                    rounded_second_derivative = round(second_derivative[-1], 2)
+        # Graphing for current price
+        plt.clf()
+        plt.plot(range(1, len(data[symbol]['prices']) + 1), data[symbol]['prices'], label='Price', marker='o')
 
-                    if rounded_second_derivative > 0.01:
-                        price_direction = "Concave Up"
-                    else:
-                        price_direction = "Concave Down"
+        if data[symbol]['moving_average_200']:
+            plt.plot(range(len(data[symbol]['prices']) - len(data[symbol]['moving_average_200']) + 1, len(data[symbol]['prices']) + 1),
+                     data[symbol]['moving_average_200'], label='Moving Average (200)', marker='o')
 
-                    from_change_number = future_change_number - 199
+        plt.legend()
+        plt.draw()
+        plt.pause(0.0000001)
+        plt.savefig(graph_file_paths[symbol])
 
-                    minPrice_change_number = future_change_number - 199 + recent_future_prices.index(minimum)
-                    # maxPrice_change_number = future_change_number - 9 + recent_future_prices.index(maximum)
+        # Graphing for MACD
+        plt.clf()
+        plt.plot(range(len(data[symbol]['prices']) - len(data[symbol]['macd']) + 1, len(data[symbol]['prices']) + 1),data[symbol]['macd'], label='MACD', marker='o')
+        plt.axhline(y=0, color='k', linestyle='-')
+        plt.plot(range(len(data[symbol]['prices']) - len(data[symbol]['signal_line']) + 1, len(data[symbol]['prices']) + 1),
+                 data[symbol]['signal_line'], label='Signal Line', marker='o')
 
-                    trade_data = {
-                        'from': from_change_number,
-                        'till': future_change_number,
-                        'Accuracy': enter_trade,
-                        'minimum_price_change_number': minPrice_change_number,
-                        'minimum_predicted_price': minimum,
-                        'moving_average_100': moving_average_100[-1] if moving_average_100 else None,
-                        'price_direction': price_direction,
-                    }
+        plt.legend()
+        plt.draw()
+        plt.pause(0.0000001)
+        plt.savefig(macd_file_paths[symbol])
 
-                    with open('analyze.jsonl', 'a') as trade_file:
-                        json.dump(trade_data, trade_file)
-                        trade_file.write('\n')
-                    recent_future_prices.clear()
+        # Graph for Predicted Values
+        if(len(data[symbol]['future_price']) > 1):
+            # Read predictions from the corresponding prediction file
+            with open(predictions_file_paths[symbol], 'r') as predictions_file:
+                prediction_data = [json.loads(line.strip()) for line in predictions_file]
 
-    plt.clf()
-    plt.plot(range(1, len(prices) + 1), prices, label='Price', marker='o')
-    
-    if moving_average_100:
-        plt.plot(range(len(prices) - len(moving_average_100) + 1, len(prices) + 1), moving_average_100, label='Moving Average (100)', marker='o')
+            # Extract data for plotting
+            predicted_change_numbers = [entry['predicted_change_number'] for entry in prediction_data]
+            future_prices = [entry['future_price'] for entry in prediction_data]
 
-    plt.legend()
-    plt.draw()
-    plt.pause(0.0000001)
-    plt.savefig(current_prices_graph)
-    plt.figtext
-
-    plt.clf()
-
-    with open('predictions.jsonl', 'r') as f:
-        lines = f.readlines()
-        prediction_data = [json.loads(line.strip()) for line in lines]
-        change_numbers = [entry['predicted_change_number'] for entry in prediction_data]
-        price_predicted = [entry['future_price'] for entry in prediction_data]
-        plt.plot(change_numbers, price_predicted, label='Price Predicted', marker='o')
-
-    plt.legend()
-    plt.draw()
-    plt.pause(0.0000001)
-    plt.savefig(predicted_prices_graph)
-    plt.figtext
-
-    plt.clf()
-    plt.plot(range(len(prices)-len(macd)+1, len(prices)+1), macd, label='MACD', marker='o')
-    plt.axhline(y=0, color='k', linestyle='-')
-    plt.plot(range(len(prices)-len(signal_line)+1, len(prices)+1), signal_line, label='Signal Line', marker='o') 
-
-    plt.legend()
-    plt.draw()
-    plt.pause(0.0000001)
-    plt.savefig(macd_file_path)
-    plt.figtext
-
-    with open('analyze.jsonl', 'r') as f:
-        analyze_data = [json.loads(line) for line in f]
-
-    with open('prices.jsonl', 'r') as f:
-        prices_data = [json.loads(line) for line in f]
-
-    for entry in analyze_data:
-        invest_change_number = entry['minimum_price_change_number']
-        for price_entry in prices_data:
-            if price_entry['change_number'] == invest_change_number:
-                current_price_min = price_entry['current_price']
-                entry['current_price'] = current_price_min
-                minimum_predicted_price = entry['minimum_predicted_price']
-                current_price = entry['current_price']
-                price_difference_min = abs(minimum_predicted_price - current_price_min)
-
-                if price_difference_min <= (0.0001 * current_price):  # Accuracy: 98% 
-                    entry['Accuracy'] = 'Super Accurate'
-
-                elif price_difference_min <= (0.0002*current_price):
-                    entry['Accuracy'] = 'Accurate'
-                else:
-                    entry['Accuracy'] = 'Not Accurate'
-
-                
-    with open('analyze.jsonl', 'w') as f:
-        for entry in analyze_data:
-            json.dump(entry, f)
-            f.write('\n')
+            # Plot the data
+            plt.clf()
+            plt.plot(predicted_change_numbers, future_prices, label='Predicted Prices', marker = 'o')
+            plt.xlabel('Predicted Change Number')
+            plt.ylabel('Future Price')
+            plt.title(f'Predicted Prices for {symbol}')
+            plt.legend()
+            plt.savefig(predictedPrice_paths[symbol])
