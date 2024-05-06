@@ -19,8 +19,8 @@ from statsmodels.tsa.seasonal import seasonal_decompose
 
 # Login to Robinhood
 login_response = rh.authentication.login(
-    username='y.orazov2018@gmail.com',
-    password='Buzmeyin2004@', 
+    username='*****************',
+    password='*****************', 
     expiresIn=86400,
     scope='internal',
     by_sms=True,
